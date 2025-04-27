@@ -4,7 +4,8 @@ import time
 import logging
 import asyncio
 import requests
-from telegram import Bot
+from telegram import Bot, Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 from dotenv import load_dotenv
 
 # Set up logging
@@ -22,11 +23,9 @@ TARGET_URL = os.getenv('TARGET_URL')
 KEYWORDS = os.getenv('KEYWORDS', '').split(',')
 CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', '300'))  # Default: 5 minutes
 
-# Initialize the bot
-bot = Bot(token=TELEGRAM_TOKEN)
-
-# Store the last fetched data to detect updates
-last_data_hash = None
+# Monitoring control
+monitoring_active = False
+monitoring_task = None
 
 
 def fetch_json_data(url):
@@ -69,19 +68,25 @@ def has_data_changed(data):
     return has_changed
 
 
-async def send_telegram_message(message):
-    """Send a message to the specified Telegram chat."""
+def format_data(data):    
+    return "Edit this for different URLs"
+
+
+async def send_notification(chat_id, message):
+    """Send a notification message to a chat."""
     try:
-        await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='Markdown')
-        logger.info("Message sent successfully")
-        return True
+        async with Bot(token=TELEGRAM_TOKEN) as bot:
+            await bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
+            logger.info("Message sent successfully")
+            return True
     except Exception as e:
         logger.error(f"Error sending message: {e}")
         return False
 
 
-async def check_and_notify():
+async def check_and_notify(context: ContextTypes.DEFAULT_TYPE):
     """Main function to check the URL and notify if needed."""
+    chat_id = CHAT_ID
     data = fetch_json_data(TARGET_URL)
     
     if data is None:
@@ -102,25 +107,121 @@ async def check_and_notify():
             message_parts.append(f"🔎 *Found keywords:* {', '.join(found_keywords)}")
         
         message = "\n\n".join(message_parts)
-        await send_telegram_message(message)
+        await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
 
-async def main():
-    """Run the bot in a loop, checking periodically."""
-    logger.info(f"Bot started. Checking {TARGET_URL} every {CHECK_INTERVAL} seconds for keywords: {KEYWORDS}")
+        # Send formatted data
+        data_message = format_data(data)
+        await context.bot.send_message(chat_id=chat_id, text=data_message, parse_mode='Markdown')
+    else:
+        await context.bot.send_message(chat_id=chat_id, text="🔎 *No keywords found", parse_mode='Markdown')
+
+
+async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /fetch command to manually fetch and return data once."""
+    await update.message.reply_text("🔄 *Fetching data once...*", parse_mode='Markdown')
     
-    # Send initial message to confirm the bot is running
-    await send_telegram_message("🤖 *Monitoring bot started!*\nI'll notify you of any updates or keywords.")
+    # One-time data fetch
+    data = fetch_json_data(TARGET_URL)
     
-    try:
-        while True:
-            await check_and_notify()
-            await asyncio.sleep(CHECK_INTERVAL)
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}")
-        await send_telegram_message(f"⚠️ *Bot error:* {str(e)}")
+    if data is None:
+        await update.message.reply_text("❌ *Error: Failed to fetch data*", parse_mode='Markdown')
+        return
+    
+    # Check for keywords and notify about them
+    found_keywords = check_for_keywords(data, KEYWORDS)
+    keywords_status = f"🔎 *Keywords check:* {'✅ Found: ' + ', '.join(found_keywords) if found_keywords else '❌ No keywords found'}"
+    await update.message.reply_text(keywords_status, parse_mode='Markdown')
+    
+    # Always send the data regardless of keywords
+    data_message = format_data(data)
+    await update.message.reply_text(data_message, parse_mode='Markdown')
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /start command to start monitoring."""
+    global monitoring_active
+    
+    if monitoring_active:
+        await update.message.reply_text("⚠️ *Monitoring is already active*", parse_mode='Markdown')
+        return
+    
+    # Initialize last_data_hash if not already set
+    global last_data_hash
+    if last_data_hash is None:
+        data = fetch_json_data(TARGET_URL)
+        if data:
+            last_data_hash = hash(json.dumps(data, sort_keys=True))
+    
+    monitoring_active = True
+    job_queue = context.application.job_queue
+    job_queue.run_repeating(check_and_notify, interval=CHECK_INTERVAL, first=1)
+    
+    status_message = (
+        "✅ *Monitoring started!*\n\n"
+        f"Checking URL every {CHECK_INTERVAL} seconds for keywords:\n"
+        f"{', '.join(KEYWORDS) if KEYWORDS else 'No keywords set'}"
+    )
+    await update.message.reply_text(status_message, parse_mode='Markdown')
+
+
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /stop command to stop monitoring."""
+    global monitoring_active
+    
+    if not monitoring_active:
+        await update.message.reply_text("⚠️ *Monitoring is not active*", parse_mode='Markdown')
+        return
+    
+    monitoring_active = False
+    
+    # Remove all jobs
+    context.application.job_queue.stop()
+    context.application.job_queue.start()
+    
+    await update.message.reply_text("🛑 *Monitoring stopped*", parse_mode='Markdown')
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /help command to show available commands."""
+    help_text = (
+        "🤖 *Monitoring Bot Commands*\n\n"
+        "/start - Start monitoring the target URL\n"
+        "/stop - Stop monitoring the target URL\n"
+        "/fetch - Fetch data now and check for keywords\n"
+        "/help - Show this help message\n\n"
+        f"Currently monitoring for keywords: {', '.join(KEYWORDS) if KEYWORDS else 'No keywords set'}"
+    )
+    await update.message.reply_text(help_text, parse_mode='Markdown')
+
+
+async def post_init(application: Application):
+    """Code to run after initialization but before polling starts."""
+    # Send a notification that the bot is online
+    if CHAT_ID:
+        await send_notification(CHAT_ID, "🤖 *Bot is online!*\nUse /help to see available commands.")
+
+
+def main():
+    """Set up the bot with command handlers and start the application."""
+    # Create the Application
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    
+    # Add command handlers
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("stop", stop_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("fetch", fetch_command))
+    
+    # Initialize last_data_hash variable
+    global last_data_hash
+    last_data_hash = None
+    
+    # Set up post-initialization code
+    application.post_init = post_init
+    
+    # Run the bot
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
