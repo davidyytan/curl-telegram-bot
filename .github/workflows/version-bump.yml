@@ -1,0 +1,74 @@
+name: Bump Version
+
+on:
+  push:
+    branches: [ 'master', 'develop' ]
+
+jobs:
+  bump_version:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ssh-key: ${{ secrets.SSH_DAVIDYYTANBOT_SECRETKEY }}
+          persist-credentials: true
+
+      - name: Check if bump is needed
+        id: check_bump
+        run: |
+          LAST_COMMIT=$(git log -1 --pretty=%B)
+          if [[ $LAST_COMMIT == *"bump:"* ]]; then
+            echo "Skip bump as last commit was a version bump"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Import GPG key
+        if: steps.check_bump.outputs.skip != 'true'
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GPG_DAVIDYYTANBOT_SECRETKEY }}
+          trust_level: 5
+          git_user_signingkey: true
+          git_commit_gpgsign: true
+          git_tag_gpgsign: true
+          git_config_global: true
+        
+      - name: Set up Python
+        if: steps.check_bump.outputs.skip != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install Commitizen
+        if: steps.check_bump.outputs.skip != 'true'
+        run: |
+          pip install commitizen==3.27.0
+      
+      - name: Version Management
+        if: steps.check_bump.outputs.skip != 'true'
+        env:
+          EDITOR: vi
+        run: |
+          echo "Current directory:"
+          pwd
+          echo "Directory contents:"
+          ls -la
+          git config --local user.name 'David Tan (Bot)'
+          git config --local user.email 'david.tan.bot@davidyytan.com'
+          
+          if [[ ${{ github.ref }} == refs/heads/master ]]; then
+            cz bump --yes --increment MINOR --gpg-sign
+          elif [[ ${{ github.ref }} == refs/heads/develop ]]; then
+            cz bump --yes --increment MINOR --prerelease alpha --gpg-sign
+          fi
+      
+      - name: Push changes
+        if: steps.check_bump.outputs.skip != 'true'
+        run: |
+          git push
+          git push --tags
