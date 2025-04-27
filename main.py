@@ -20,20 +20,52 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 TARGET_URL = os.getenv('TARGET_URL')
-KEYWORDS = os.getenv('KEYWORDS', '').split(',')
+KEYWORDS = [k.strip() for k in os.getenv('KEYWORDS', '').split(',') if k.strip()]
 CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', '300'))  # Default: 5 minutes
+
+# Validate required environment variables
+if not TELEGRAM_TOKEN:
+    raise ValueError("TELEGRAM_TOKEN environment variable is required")
+if not TARGET_URL:
+    raise ValueError("TARGET_URL environment variable is required")
+if not CHAT_ID:
+    logger.warning("CHAT_ID environment variable is not set. Notifications will not be sent automatically.")
 
 # Monitoring control
 monitoring_active = False
 monitoring_task = None
 
+# Rate limiting
+last_api_call_time = 0
+MIN_API_CALL_INTERVAL = 1  # Minimum 1 second between API calls
+
 
 def fetch_json_data(url):
-    """Fetch JSON data from the specified URL."""
+    """Fetch JSON data from the specified URL with rate limiting."""
+    global last_api_call_time
+    
+    # Apply rate limiting
+    current_time = time.time()
+    time_since_last_call = current_time - last_api_call_time
+    
+    if time_since_last_call < MIN_API_CALL_INTERVAL:
+        sleep_time = MIN_API_CALL_INTERVAL - time_since_last_call
+        logger.debug(f"Rate limiting: Sleeping for {sleep_time:.2f} seconds")
+        time.sleep(sleep_time)
+    
+    last_api_call_time = time.time()
+    
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
-        return response.json()
+        
+        # Validate that the response is valid JSON
+        try:
+            return response.json()
+        except ValueError as json_err:
+            logger.error(f"Invalid JSON response: {json_err}")
+            return None
+            
     except requests.RequestException as e:
         logger.error(f"Error fetching data: {e}")
         return None
@@ -68,8 +100,8 @@ def has_data_changed(data):
     return has_changed
 
 
-def format_data(data):    
-    return "Edit this for different URLs"
+def format_data(data):
+    return "Edit this to query response from your url."
 
 
 async def send_notification(chat_id, message):
@@ -113,7 +145,7 @@ async def check_and_notify(context: ContextTypes.DEFAULT_TYPE):
         data_message = format_data(data)
         await context.bot.send_message(chat_id=chat_id, text=data_message, parse_mode='Markdown')
     else:
-        await context.bot.send_message(chat_id=chat_id, text="🔎 *No keywords found", parse_mode='Markdown')
+        await context.bot.send_message(chat_id=chat_id, text="🔎 *No keywords found*", parse_mode='Markdown')
 
 
 async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -139,7 +171,7 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the /start command to start monitoring."""
-    global monitoring_active
+    global monitoring_active, monitoring_task
     
     if monitoring_active:
         await update.message.reply_text("⚠️ *Monitoring is already active*", parse_mode='Markdown')
@@ -154,7 +186,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     monitoring_active = True
     job_queue = context.application.job_queue
-    job_queue.run_repeating(check_and_notify, interval=CHECK_INTERVAL, first=1)
+    monitoring_task = job_queue.run_repeating(check_and_notify, interval=CHECK_INTERVAL, first=1)
     
     status_message = (
         "✅ *Monitoring started!*\n\n"
@@ -166,7 +198,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the /stop command to stop monitoring."""
-    global monitoring_active
+    global monitoring_active, monitoring_task
     
     if not monitoring_active:
         await update.message.reply_text("⚠️ *Monitoring is not active*", parse_mode='Markdown')
@@ -174,9 +206,10 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     monitoring_active = False
     
-    # Remove all jobs
-    context.application.job_queue.stop()
-    context.application.job_queue.start()
+    # Remove the specific job instead of stopping/starting the queue
+    if monitoring_task:
+        monitoring_task.schedule_removal()
+        monitoring_task = None
     
     await update.message.reply_text("🛑 *Monitoring stopped*", parse_mode='Markdown')
 
