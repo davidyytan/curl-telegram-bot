@@ -144,8 +144,6 @@ async def check_and_notify(context: ContextTypes.DEFAULT_TYPE):
         # Send formatted data
         data_message = format_data(data)
         await context.bot.send_message(chat_id=chat_id, text=data_message, parse_mode='Markdown')
-    else:
-        await context.bot.send_message(chat_id=chat_id, text="🔎 *No keywords found*", parse_mode='Markdown')
 
 
 async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -253,7 +251,7 @@ def main():
     application.post_init = post_init
     
     # Run the bot
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling(allowed_updates=Update.ALL_TYPES, poll_interval=30, timeout=10)
 
 
 if __name__ == "__main__":
