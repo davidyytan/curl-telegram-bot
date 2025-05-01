@@ -251,7 +251,7 @@ def main():
     application.post_init = post_init
     
     # Run the bot
-    application.run_polling(allowed_updates=Update.ALL_TYPES, poll_interval=30, timeout=10)
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
