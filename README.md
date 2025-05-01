@@ -9,7 +9,9 @@ A Python bot that monitors a JSON endpoint and sends Telegram notifications when
 - Periodic checking of a JSON API endpoint
 - Change detection using hash comparison
 - Keyword monitoring in JSON data
-- Telegram notifications with formatting
+- Telegram notifications with Markdown formatting
+- Manual data fetching and checking
+- Start/stop monitoring controls
 
 ## Requirements
 
@@ -67,11 +69,32 @@ Run the bot with:
 python main.py
 ```
 
-The bot will start monitoring the configured URL and send notifications to your Telegram chat when changes or specified keywords are detected.
+The bot will start and send a notification that it's online. It won't automatically start monitoring until you use the start command.
 
-> **Note**: If your API endpoint is geo-restricted, consider using a VPN before making requests to the endpoint.
+### Bot Commands
+
+The bot responds to the following commands:
+
+- `/start` - Start monitoring the target URL at the configured interval
+- `/stop` - Stop the monitoring process
+- `/fetch` - Manually fetch data once and check for keywords
+- `/help` - Display available commands and monitoring status
+
+## Customization
+
+The bot is designed to be easily customizable for different JSON APIs:
+
+- The `format_data()` function in `main.py` can be modified to format the JSON data according to your needs
+- The data change detection uses hashing to identify when the endpoint returns different data
+- Keyword checking is performed on the entire JSON string for simplicity
 
 ## Notification Format
 
+- 🤖 **Bot is online!** - When the bot starts up
+- ✅ **Monitoring started!** - When monitoring is activated
+- 🛑 **Monitoring stopped** - When monitoring is deactivated
 - 🔄 **Data has been updated!** - When the JSON data changes
-- 🔎 **Found keywords:** keyword1, keyword2 - When specified keywords are found 
+- 🔎 **Found keywords:** keyword1, keyword2 - When specified keywords are found
+- 🔎 **No keywords found** - When no keywords are found during a check
+
+> **Note**: If your API endpoint is geo-restricted, consider using a VPN before making requests to the endpoint. 
