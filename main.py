@@ -4,7 +4,8 @@ import time
 import logging
 import asyncio
 import requests
-import re  # Add this import
+import re
+import random
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from dotenv import load_dotenv
@@ -238,7 +239,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     monitoring_active = True
     job_queue = context.application.job_queue
-    monitoring_task = job_queue.run_repeating(check_and_notify, interval=CHECK_INTERVAL, first=1)
+    randomized_interval = CHECK_INTERVAL * random.uniform(0.9, 1.1)
+    monitoring_task = job_queue.run_repeating(check_and_notify, interval=randomized_interval, first=1)
     
     # Format keywords for display
     all_keywords = []
