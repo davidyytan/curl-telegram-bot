@@ -4,6 +4,7 @@ import time
 import logging
 import asyncio
 import requests
+import re  # Add this import
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from dotenv import load_dotenv
@@ -20,7 +21,8 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 TARGET_URL = os.getenv('TARGET_URL')
-KEYWORDS = [k.strip() for k in os.getenv('KEYWORDS', '').split(',') if k.strip()]
+KEYWORDS_CASE_INSENSITIVE = [k.strip() for k in os.getenv('KEYWORDS_CASE_INSENSITIVE', '').split(',') if k.strip()]
+KEYWORDS_CASE_SENSITIVE = [k.strip() for k in os.getenv('KEYWORDS_CASE_SENSITIVE', '').split(',') if k.strip()]
 CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', '300'))  # Default: 5 minutes
 
 # Validate required environment variables
@@ -71,17 +73,55 @@ def fetch_json_data(url):
         return None
 
 
-def check_for_keywords(data, keywords):
+def check_for_keywords(data):
     """Check if any keywords are present in the JSON data."""
-    # Convert JSON to string for simple keyword searching
-    data_str = json.dumps(data).lower()
-    found_keywords = []
+    found_keywords = {
+        'case_insensitive': [],
+        'case_sensitive': []
+    }
     
-    for keyword in keywords:
-        if keyword.lower() in data_str:
-            found_keywords.append(keyword)
+    def search_in_data(obj, keyword, case_sensitive=False):
+        """Recursively search for keyword in data structure."""
+        if isinstance(obj, dict):
+            # Search in keys and values
+            for key, value in obj.items():
+                if search_whole_word(str(key), keyword, case_sensitive) or search_in_data(value, keyword, case_sensitive):
+                    return True
+        elif isinstance(obj, list):
+            # Search in list items
+            for item in obj:
+                if search_in_data(item, keyword, case_sensitive):
+                    return True
+        elif isinstance(obj, str):
+            # Direct string search (whole word only)
+            return search_whole_word(obj, keyword, case_sensitive)
+        else:
+            # For other types (int, float, bool, None), convert to string
+            return search_whole_word(str(obj), keyword, case_sensitive)
+        return False
     
-    return found_keywords
+    def search_whole_word(text, keyword, case_sensitive=False):
+        """Search for whole word matches using regex word boundaries."""
+        # Escape special regex characters in the keyword
+        escaped_keyword = re.escape(keyword)
+        # Use word boundaries to match whole words only
+        pattern = r'\b' + escaped_keyword + r'\b'
+        flags = 0 if case_sensitive else re.IGNORECASE
+        return bool(re.search(pattern, text, flags))
+    
+    # Check case-insensitive keywords
+    for keyword in KEYWORDS_CASE_INSENSITIVE:
+        if keyword.strip() and search_in_data(data, keyword, case_sensitive=False):
+            found_keywords['case_insensitive'].append(keyword)
+    
+    # Check case-sensitive keywords
+    for keyword in KEYWORDS_CASE_SENSITIVE:
+        if keyword.strip() and search_in_data(data, keyword, case_sensitive=True):
+            found_keywords['case_sensitive'].append(keyword)
+    
+    # Return flattened list of all found keywords for backward compatibility
+    all_found = found_keywords['case_insensitive'] + found_keywords['case_sensitive']
+    return all_found, found_keywords
 
 
 def has_data_changed(data):
@@ -126,7 +166,7 @@ async def check_and_notify(context: ContextTypes.DEFAULT_TYPE):
         return
     
     data_changed = has_data_changed(data)
-    found_keywords = check_for_keywords(data, KEYWORDS)
+    found_keywords, keyword_details = check_for_keywords(data)
     
     # Prepare notification if needed
     if data_changed or found_keywords:
@@ -136,7 +176,12 @@ async def check_and_notify(context: ContextTypes.DEFAULT_TYPE):
             message_parts.append("🔄 *Data has been updated!*")
         
         if found_keywords:
-            message_parts.append(f"🔎 *Found keywords:* {', '.join(found_keywords)}")
+            keyword_msg = "🔎 *Found keywords:*\n"
+            if keyword_details['case_insensitive']:
+                keyword_msg += f"• Case-insensitive: {', '.join(keyword_details['case_insensitive'])}\n"
+            if keyword_details['case_sensitive']:
+                keyword_msg += f"• Case-sensitive: {', '.join(keyword_details['case_sensitive'])}"
+            message_parts.append(keyword_msg)
         
         message = "\n\n".join(message_parts)
         await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
@@ -158,9 +203,18 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Check for keywords and notify about them
-    found_keywords = check_for_keywords(data, KEYWORDS)
-    keywords_status = f"🔎 *Keywords check:* {'✅ Found: ' + ', '.join(found_keywords) if found_keywords else '❌ No keywords found'}"
-    await update.message.reply_text(keywords_status, parse_mode='Markdown')
+    found_keywords, keyword_details = check_for_keywords(data)
+    
+    if found_keywords:
+        keyword_msg = "🔎 *Keywords found:*\n"
+        if keyword_details['case_insensitive']:
+            keyword_msg += f"• Case-insensitive: {', '.join(keyword_details['case_insensitive'])}\n"
+        if keyword_details['case_sensitive']:
+            keyword_msg += f"• Case-sensitive: {', '.join(keyword_details['case_sensitive'])}"
+    else:
+        keyword_msg = "❌ *No keywords found*"
+    
+    await update.message.reply_text(keyword_msg, parse_mode='Markdown')
     
     # Always send the data regardless of keywords
     data_message = format_data(data)
@@ -186,10 +240,19 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job_queue = context.application.job_queue
     monitoring_task = job_queue.run_repeating(check_and_notify, interval=CHECK_INTERVAL, first=1)
     
+    # Format keywords for display
+    all_keywords = []
+    if KEYWORDS_CASE_INSENSITIVE:
+        all_keywords.append(f"Case-insensitive: {', '.join(KEYWORDS_CASE_INSENSITIVE)}")
+    if KEYWORDS_CASE_SENSITIVE:
+        all_keywords.append(f"Case-sensitive: {', '.join(KEYWORDS_CASE_SENSITIVE)}")
+    
+    keywords_display = '\n'.join(all_keywords) if all_keywords else 'No keywords set'
+    
     status_message = (
         "✅ *Monitoring started!*\n\n"
         f"Checking URL every {CHECK_INTERVAL} seconds for keywords:\n"
-        f"{', '.join(KEYWORDS) if KEYWORDS else 'No keywords set'}"
+        f"{keywords_display}"
     )
     await update.message.reply_text(status_message, parse_mode='Markdown')
 
@@ -214,13 +277,22 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the /help command to show available commands."""
+    # Format keywords for display
+    all_keywords = []
+    if KEYWORDS_CASE_INSENSITIVE:
+        all_keywords.append(f"Case-insensitive: {', '.join(KEYWORDS_CASE_INSENSITIVE)}")
+    if KEYWORDS_CASE_SENSITIVE:
+        all_keywords.append(f"Case-sensitive: {', '.join(KEYWORDS_CASE_SENSITIVE)}")
+    
+    keywords_display = '\n'.join(all_keywords) if all_keywords else 'No keywords set'
+    
     help_text = (
         "🤖 *Monitoring Bot Commands*\n\n"
         "/start - Start monitoring the target URL\n"
         "/stop - Stop monitoring the target URL\n"
         "/fetch - Fetch data now and check for keywords\n"
         "/help - Show this help message\n\n"
-        f"Currently monitoring for keywords: {', '.join(KEYWORDS) if KEYWORDS else 'No keywords set'}"
+        f"Currently monitoring for keywords:\n{keywords_display}"
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
